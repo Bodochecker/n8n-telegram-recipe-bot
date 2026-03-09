@@ -1,0 +1,1793 @@
+{
+  "name": "Recipes Workflow Base Metric",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message",
+          "callback_query"
+        ],
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        2528,
+        4416
+      ],
+      "id": "18023322-8e3c-4b64-90fe-11cd383d56a0",
+      "name": "Telegram Trigger",
+      "webhookId": "",
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": ""
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "function parseQs(qs) {\n  const out = {};\n  if (!qs) return out;\n  for (const part of String(qs).split('|')) {\n    const i = part.indexOf('=');\n    if (i === -1) continue;\n    const k = part.slice(0, i);\n    const v = part.slice(i + 1);\n    out[k] = v;\n  }\n  return out;\n}\n\nconst u = $json;\n\n\nconst cb = u.callback_query;\nconst msg = u.message || (cb && cb.message);\n\nconst chat_id = msg?.chat?.id ?? null;\nconst text = msg?.text ?? '';\nconst cb_data = cb?.data ?? '';\n\nconst parsed = parseQs(cb_data);\n\nlet kind = 'unknown';\nlet command = null;\n\nif (cb) {\n  kind = 'callback';\n} else if (msg) {\n  kind = 'message';\n  if (typeof text === 'string' && text.startsWith('/')) {\n  const firstToken = text.trim().split(/\\s+/)[0].toLowerCase();\n  command = firstToken.replace(/@[\\w_]+$/, '');\n}\n}\n\nreturn [{\n  json: {\n    kind,\n    command,\n    chat_id,\n    message_id: msg?.message_id ?? null,\n    from_id: msg?.from?.id ?? null,\n    clicked_by: cb?.from?.id ?? null,\n    callback_id: cb?.id ?? null,\n    callback_data: cb_data,\n    parsed,\n    raw: u,\n\n    TELEGRAM_BOT_TOKEN: u.TELEGRAM_BOT_TOKEN || '',\n    PAGE_SIZE: u.PAGE_SIZE || 10,\n    RECIPE_SLOTS: u.RECIPE_SLOTS || 5,\n    INGREDIENT_PREVIEW_COUNT: u.INGREDIENT_PREVIEW_COUNT || 8,\n    MAX_INSTRUCTION_STEPS: u.MAX_INSTRUCTION_STEPS || 30\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2944,
+        4416
+      ],
+      "id": "0606ced8-4e13-4e8d-a11b-7c7636168f0d",
+      "name": "Parse Telegram Command"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Chat state\nCREATE TABLE IF NOT EXISTS chat_state (\n  chat_id BIGINT PRIMARY KEY,\n  shopping_page INTEGER NOT NULL DEFAULT 1,\n  shopping_list_message_id BIGINT,\n  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),\n  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()\n);\n\nALTER TABLE chat_state\n  ADD COLUMN IF NOT EXISTS shopping_page INTEGER NOT NULL DEFAULT 1;\n\nALTER TABLE chat_state\n  ADD COLUMN IF NOT EXISTS shopping_list_message_id BIGINT;\n\nALTER TABLE chat_state\n  ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();\n\nALTER TABLE chat_state\n  ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();\n\n-- Shopping list items\nCREATE TABLE IF NOT EXISTS shopping_list_items (\n  id BIGSERIAL PRIMARY KEY,\n  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),\n  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),\n  chat_id BIGINT NOT NULL,\n  ingredient_key TEXT NOT NULL,\n  ingredient_name TEXT NOT NULL,\n  qty DOUBLE PRECISION,\n  unit TEXT\n);\n\nALTER TABLE shopping_list_items\n  ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();\n\nALTER TABLE shopping_list_items\n  ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();\n\nALTER TABLE shopping_list_items\n  ADD COLUMN IF NOT EXISTS chat_id BIGINT;\n\nALTER TABLE shopping_list_items\n  ADD COLUMN IF NOT EXISTS ingredient_key TEXT;\n\nALTER TABLE shopping_list_items\n  ADD COLUMN IF NOT EXISTS ingredient_name TEXT;\n\nALTER TABLE shopping_list_items\n  ADD COLUMN IF NOT EXISTS qty DOUBLE PRECISION;\n\nALTER TABLE shopping_list_items\n  ADD COLUMN IF NOT EXISTS unit TEXT;\n\nCREATE INDEX IF NOT EXISTS idx_shopping_chat\nON shopping_list_items (chat_id);\n\nCREATE UNIQUE INDEX IF NOT EXISTS uq_shopping_item\nON shopping_list_items (chat_id, ingredient_key, COALESCE(unit,''));",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2528,
+        4048
+      ],
+      "id": "2df18f73-d829-4f55-946b-f044fe43cba0",
+      "name": "Initialize Database",
+      "credentials": {
+        "postgres": {
+          "id": " ",
+          "name": " "
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://themealdb.com/api/json/v1/1/random.php",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        3632,
+        4544
+      ],
+      "id": "c990f97f-b242-4988-a48b-dfd77ab5f022",
+      "name": "Fetch Random Recipe (TheMealDB)"
+    },
+    {
+      "parameters": {
+        "jsCode": "function esc(s) {\n  return String(s || '').trim();\n}\n\nconst out = [];\n\nfor (const item of $input.all()) {\n  const j = item.json;\n\n  const title = esc(j.title);\n  const category = esc(j.category);\n  const area = esc(j.area);\n  const image = esc(j.image);\n  const recipeId = esc(j.recipe_id);\n  const source = esc(j.source);\n  const ingredientsPreview = Array.isArray(j.ingredients_preview)\n    ? j.ingredients_preview\n    : [];\n\n  const cycleId = `${Date.now()}_${recipeId}`;\n\n  const lines = [];\n  lines.push(`🍽 ${title}`);\n\n  const meta = [category, area].filter(Boolean).join(' | ');\n  if (meta) {\n    lines.push(meta);\n  }\n\nif (ingredientsPreview.length) {\n  lines.push('');\n  lines.push('🛒 Ingredients:');\n\n  for (const ing of ingredientsPreview) {\n    lines.push(`• ${ing}`);\n  }\n\n  const totalIngredients = Array.isArray(j.raw_ingredients) ? j.raw_ingredients.length : ingredientsPreview.length;\n  const hiddenCount = Math.max(0, totalIngredients - ingredientsPreview.length);\n\n  if (hiddenCount > 0) {\n    lines.push(`• +${hiddenCount} more`);\n  }\n}\n\n  const text = lines.join('\\n');\n\n  out.push({\n    json: {\n      photo_url: image || null,\n      text,\n      reply_markup: {\n        inline_keyboard: [\n          [\n            {\n              text: '✅ Add to List',\n              callback_data: `a=vote|d=y|s=${source}|c=${cycleId}|r=${recipeId}`\n            },\n            {\n              text: '❌ Skip',\n              callback_data: `a=vote|d=n|s=${source}|c=${cycleId}|r=${recipeId}`\n            }\n          ],\n          [\n            {\n              text: '📖 Instructions',\n              callback_data: `a=inst|s=${source}|r=${recipeId}`\n            }\n          ]\n        ]\n      }\n    }\n  });\n}\n\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4160,
+        4544
+      ],
+      "id": "6fb0021a-f512-4561-89e6-fcba0cf25a53",
+      "name": "Build Recipe Message"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO chat_state (chat_id, shopping_page, updated_at)\nVALUES ($1, 1, now())\nON CONFLICT (chat_id)\nDO UPDATE SET\n  updated_at = EXCLUDED.updated_at;",
+        "options": {
+          "queryReplacement": "={{ $('Route Telegram Action').item.json.chat_id }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        3568,
+        3872
+      ],
+      "id": "edbaddb2-687e-4a4c-b411-c7b57ecd6306",
+      "name": "Upsert Chat State",
+      "credentials": {
+        "postgres": {
+          "id": " ",
+          "name": " "
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT shopping_page, shopping_list_message_id\nFROM chat_state\nWHERE chat_id = $1;",
+        "options": {
+          "queryReplacement": "={{ $('Parse Telegram Command').item.json.chat_id }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        4720,
+        4288
+      ],
+      "id": "9b6e730a-9dde-4307-bab1-72da6fada009",
+      "name": "Load Chat State",
+      "credentials": {
+        "postgres": {
+          "id": " ",
+          "name": " "
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT COUNT(*) AS total\nFROM shopping_list_items\nWHERE chat_id = $1;",
+        "options": {
+          "queryReplacement": "={{ $('Parse Telegram Command').item.json.chat_id }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        4896,
+        4384
+      ],
+      "id": "99b0c3eb-f17b-4f6d-94b2-0af6794ba9ce",
+      "name": "Count Shopping List Items",
+      "credentials": {
+        "postgres": {
+          "id": " ",
+          "name": " "
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n  s.id,\n  s.ingredient_name,\n  s.qty,\n  s.unit\nFROM shopping_list_items s\nWHERE s.chat_id = $1\nORDER BY s.ingredient_name ASC\nLIMIT $2 OFFSET $3;",
+        "options": {
+          "queryReplacement": "={{ [\n  $('Parse Telegram Command').item.json.chat_id,\n  Number($('Parse Telegram Command').item.json.PAGE_SIZE || 10),\n  (Math.min(\n     Math.max(1, Number($('Load Chat State').item.json.shopping_page || 1)),\n     Math.max(\n       1,\n       Math.ceil(\n         Number($('Count Shopping List Items').item.json.total || 0) /\n         Number($('Parse Telegram Command').item.json.PAGE_SIZE || 10)\n       )\n     )\n   ) - 1) * Number($('Parse Telegram Command').item.json.PAGE_SIZE || 10)\n] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        5072,
+        4496
+      ],
+      "id": "c714ec53-6856-4e4a-bc38-36c3c6443410",
+      "name": "Load Shopping List Page",
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": " ",
+          "name": " "
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "DELETE FROM shopping_list_items\nWHERE chat_id = $1\n  AND id = $2;",
+        "options": {
+          "queryReplacement": "={{ [\n  $('Route Telegram Action').item.json.chat_id,\n  Number($('Route Telegram Action').item.json.parsed.id)\n] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        3568,
+        4336
+      ],
+      "id": "94ff55d7-00b0-4bcc-821b-195ed3fff3ba",
+      "name": "Delete Shopping List Item",
+      "credentials": {
+        "postgres": {
+          "id": " ",
+          "name": " "
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const pageSize = Number($('Parse Telegram Command').item.json.PAGE_SIZE || 10);\nconst cols = 2;\nconst rowsPerPage = Math.ceil(pageSize / cols);\n\nconst chat_id = $('Parse Telegram Command').item.json.chat_id;\nconst page = Math.max(1, Number($('Load Chat State').item.json.shopping_page || 1));\nconst total = Number($('Count Shopping List Items').item.json.total || 0);\nconst maxPage = Math.max(1, Math.ceil(total / pageSize));\n\nconst items = $('Load Shopping List Page')\n  .all()\n  .map(i => i.json)\n  .filter(i => i && i.id !== undefined);\n\nfunction fmtQty(q) {\n  if (q === null || q === undefined) return '';\n  const n = Number(q);\n  if (Number.isNaN(n)) return '';\n  return (Math.round(n * 100) / 100).toString();\n}\n\nfunction shortName(s, max = 18) {\n  s = String(s || '').trim();\n  if (!s) return 'Item';\n  if (s.length <= max) return s;\n\n  const cut = s.slice(0, max);\n  const lastSpace = cut.lastIndexOf(' ');\n\n  if (lastSpace > max * 0.6) {\n    return cut.slice(0, lastSpace) + '…';\n  }\n\n  return cut + '…';\n}\n\nfunction label(it) {\n  const qty = fmtQty(it.qty);\n  const unit = (it.unit || '').trim();\n  const right = [qty, unit].filter(Boolean).join(' ');\n  return `${it.ingredient_name}${right ? ' — ' + right : ''}`;\n}\n\nif (items.length === 0) {\n  return [{\n    json: {\n      chat_id,\n      text: '🛒 Shopping List\\n\\n✅ All done. List is empty.',\n      reply_markup: {\n        inline_keyboard: [\n          [\n            { text: '🔄 Refresh', callback_data: 'a=r' },\n          ],\n        ],\n      },\n      page: 1,\n      maxPage: 1,\n      pageSize,\n    }\n  }];\n}\n\nconst header = `🛒 Shopping List (Page ${page}/${maxPage})`;\nconst lines = items.map((it, i) => `${i + 1}. ${label(it)}`);\nconst text = header + '\\n\\n' + lines.join('\\n');\n\nconst kb = [];\nfor (let r = 0; r < rowsPerPage; r++) {\n  const row = [];\n  for (let c = 0; c < cols; c++) {\n    const idx = r * cols + c;\n    const it = items[idx];\n    if (!it) continue;\n\n    const btnText = `${idx + 1}. ${shortName(it.ingredient_name, 18)}`;\n\n    row.push({\n      text: btnText,\n      callback_data: `a=t|id=${it.id}`,\n    });\n  }\n  if (row.length) kb.push(row);\n}\n\nconst prevPage = Math.max(1, page - 1);\nconst nextPage = Math.min(maxPage, page + 1);\n\nkb.push([\n  { text: '⬅️', callback_data: `a=p|p=${prevPage}` },\n  { text: '🔄 Refresh', callback_data: 'a=r' },\n  { text: '➡️', callback_data: `a=p|p=${nextPage}` },\n]);\n\nreturn [{\n  json: {\n    chat_id,\n    text,\n    reply_markup: { inline_keyboard: kb },\n    page,\n    maxPage,\n    pageSize,\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5248,
+        4592
+      ],
+      "id": "314943e7-6046-49df-876f-64b5a58646dc",
+      "name": "Build Shopping List Message"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "d74d8139-55fe-43f1-890f-c7e8328ecb22",
+              "leftValue": "={{ Number($('Load Chat State').item.json.shopping_list_message_id || 0) }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        5424,
+        4688
+      ],
+      "id": "abdfa32b-bc94-4522-b004-571a5db71172",
+      "name": "Check Existing Shopping List Message"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE chat_state\nSET shopping_list_message_id = $1,\n    updated_at = now()\nWHERE chat_id = $2;",
+        "options": {
+          "queryReplacement": "={{ [\n  $json.message_id,\n  $json.chat_id\n] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        5968,
+        4800
+      ],
+      "id": "040bb901-e234-48b8-becd-c913aa29f063",
+      "name": "Update Chat State",
+      "credentials": {
+        "postgres": {
+          "id": " ",
+          "name": " "
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "e0d77e42-9983-4321-8013-f866b2d6efd5",
+              "name": "message_id",
+              "value": "={{$json.result.message_id}}",
+              "type": "string"
+            },
+            {
+              "id": "b062585d-a089-48fe-a79e-8b4887c234ff",
+              "name": "chat_id",
+              "value": "={{$json.result.chat.id}}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        5792,
+        4800
+      ],
+      "id": "2a764003-a2aa-445d-a25e-3f204a23e800",
+      "name": "Extract Telegram Message Metadata"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT shopping_page, shopping_list_message_id\nFROM chat_state\nWHERE chat_id = $1;",
+        "options": {
+          "queryReplacement": "={{ $('Route Telegram Action').item.json.chat_id }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        3744,
+        4336
+      ],
+      "id": "b7d80406-4113-4898-a1eb-5c2121a327c8",
+      "name": "Load Chat State (Toggle)",
+      "credentials": {
+        "postgres": {
+          "id": " ",
+          "name": " "
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT COUNT(*) AS total\nFROM shopping_list_items\nWHERE chat_id = $1;",
+        "options": {
+          "queryReplacement": "={{ $('Route Telegram Action').item.json.chat_id }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        3920,
+        4336
+      ],
+      "id": "a8ad4678-ed73-458e-8162-3d7b2916af63",
+      "name": "Count Shopping List Items (Toggle)",
+      "credentials": {
+        "postgres": {
+          "id": " ",
+          "name": " "
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n  s.id,\n  s.ingredient_name,\n  s.qty,\n  s.unit\nFROM shopping_list_items s\nWHERE s.chat_id = $1\nORDER BY s.ingredient_name ASC\nLIMIT $2 OFFSET $3;",
+        "options": {
+          "queryReplacement": "={{ [\n  $('Route Telegram Action').item.json.chat_id,\n  Number($('Parse Telegram Command').item.json.PAGE_SIZE || 10),\n  (Math.min(\n     Math.max(1, Number($('Load Chat State (Toggle)').item.json.shopping_page || 1)),\n     Math.max(\n       1,\n       Math.ceil(\n         Number($('Count Shopping List Items (Toggle)').item.json.total || 0) /\n         Number($('Parse Telegram Command').item.json.PAGE_SIZE || 10)\n       )\n     )\n   ) - 1) * Number($('Parse Telegram Command').item.json.PAGE_SIZE || 10)\n] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        4096,
+        4336
+      ],
+      "id": "ccb4c9fa-2583-4d99-85d6-3d3deaa3edf5",
+      "name": "Load Shopping List Page (Toggle)",
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": " ",
+          "name": " "
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const pageSize = Number($('Parse Telegram Command').item.json.PAGE_SIZE || 10);\nconst cols = 2;\nconst rowsPerPage = Math.ceil(pageSize / cols);\n\nconst chat_id = $('Parse Telegram Command').item.json.chat_id;\nconst page = Math.max(1, Number($('Load Chat State (Toggle)').first().json.shopping_page || 1));\nconst total = Number($('Count Shopping List Items (Toggle)').first().json.total || 0);\nconst maxPage = Math.max(1, Math.ceil(total / pageSize));\n\nconst items = $('Load Shopping List Page (Toggle)')\n  .all()\n  .map(i => i.json)\n  .filter(i => i && i.id !== undefined);\n\nfunction fmtQty(q) {\n  if (q === null || q === undefined) return '';\n  const n = Number(q);\n  if (Number.isNaN(n)) return '';\n  return (Math.round(n * 100) / 100).toString();\n}\n\nfunction shortName(s, max = 18) {\n  s = String(s || '').trim();\n  if (!s) return 'Item';\n  if (s.length <= max) return s;\n\n  const cut = s.slice(0, max);\n  const lastSpace = cut.lastIndexOf(' ');\n\n  if (lastSpace > max * 0.6) {\n    return cut.slice(0, lastSpace) + '…';\n  }\n\n  return cut + '…';\n}\n\nfunction label(it) {\n  const qty = fmtQty(it.qty);\n  const unit = (it.unit || '').trim();\n  const right = [qty, unit].filter(Boolean).join(' ');\n  return `${it.ingredient_name}${right ? ' — ' + right : ''}`;\n}\n\nif (items.length === 0) {\n  return [{\n    json: {\n      chat_id,\n      text: '🛒 Shopping List\\n\\n✅ All done. List is empty.',\n      reply_markup: {\n        inline_keyboard: [\n          [\n            { text: '🔄 Refresh', callback_data: 'a=r' },\n          ],\n        ],\n      },\n      page: 1,\n      maxPage: 1,\n      pageSize,\n    }\n  }];\n}\n\n\nconst header = `🛒 Shopping List (Page ${page}/${maxPage})`;\nconst lines = items.map((it, i) => `${i + 1}. ${label(it)}`);\nconst text = header + '\\n\\n' + lines.join('\\n');\n\nconst kb = [];\nfor (let r = 0; r < rowsPerPage; r++) {\n  const row = [];\n  for (let c = 0; c < cols; c++) {\n    const idx = r * cols + c;\n    const it = items[idx];\n    if (!it) continue;\n\n    const btnText = `${idx + 1}. ${shortName(it.ingredient_name, 18)}`;\n\n    row.push({\n      text: btnText,\n      callback_data: `a=t|id=${it.id}`,\n    });\n  }\n  if (row.length) kb.push(row);\n}\n\nconst prevPage = Math.max(1, page - 1);\nconst nextPage = Math.min(maxPage, page + 1);\n\nkb.push([\n  { text: '⬅️', callback_data: `a=p|p=${prevPage}` },\n  { text: '🔄 Refresh', callback_data: 'a=r' },\n  { text: '➡️', callback_data: `a=p|p=${nextPage}` },\n]);\n\nreturn [{\n  json: {\n    chat_id,\n    text,\n    reply_markup: { inline_keyboard: kb },\n    page,\n    maxPage,\n    pageSize,\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4272,
+        4336
+      ],
+      "id": "a58bad69-55ad-4fe5-b253-db5f4957d9f4",
+      "name": "Build Shopping List Message (Toggle)"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{$json.kind === 'callback' ? $json.parsed.a : $json.command}}",
+                    "rightValue": "/list",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "b09a909d-3104-4496-815c-2ebe35f44a2f"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Show Shopping List"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "627a3ee1-23c9-4a4c-b112-67e81fd68732",
+                    "leftValue": "={{$json.kind === 'callback' ? $json.parsed.a : $json.command}}",
+                    "rightValue": "p",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Paging"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "82ae5242-43e6-4f34-adb5-79ddd46aded1",
+                    "leftValue": "={{$json.kind === 'callback' ? $json.parsed.a : $json.command}}",
+                    "rightValue": "r",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Refresh"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "720af55a-ee6a-4072-8ad5-1461381c1b98",
+                    "leftValue": "={{$json.kind === 'callback' ? $json.parsed.a : $json.command}}",
+                    "rightValue": "t",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Toggle"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "85421013-86c8-4ddd-b0be-d40ffd78f064",
+                    "leftValue": "={{$json.kind === 'callback' ? $json.parsed.a : $json.command}}",
+                    "rightValue": "/recipe",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Recipe Suggestions"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "90a573e3-1fed-41c1-a443-820ebba646cc",
+                    "leftValue": "={{$json.kind === 'callback' ? $json.parsed.a : $json.command}}",
+                    "rightValue": "vote",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Recipe Vote"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "5ca1efa8-39cb-428b-b826-2c0a6d434038",
+                    "leftValue": "={{$json.kind === 'callback' ? $json.parsed.a : $json.command}}",
+                    "rightValue": "inst",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Instructions"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "1b70910b-b211-4eb4-aca7-398872016ff5",
+                    "leftValue": "={{$json.kind === 'callback' ? $json.parsed.a : $json.command}}",
+                    "rightValue": "/help",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Help"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        3104,
+        4320
+      ],
+      "id": "198e710b-3a91-4b7b-810a-881fd68046aa",
+      "name": "Route Telegram Action"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE chat_state\nSET shopping_page = $1,\n    updated_at = now()\nWHERE chat_id = $2;",
+        "options": {
+          "queryReplacement": "={{ Number($('Parse Telegram Command').item.json.parsed.p || 1) }},{{ $('Parse Telegram Command').item.json.chat_id }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        3392,
+        4032
+      ],
+      "id": "57afacb4-df97-4523-9221-be3626ca2385",
+      "name": "Update Shopping List Page",
+      "credentials": {
+        "postgres": {
+          "id": " ",
+          "name": " "
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT chat_id, shopping_list_message_id\nFROM chat_state;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2976,
+        3712
+      ],
+      "id": "dc5592b9-7023-45bd-b9f9-09066a986960",
+      "name": "Optional Debug: Check Chat State",
+      "credentials": {
+        "postgres": {
+          "id": " ",
+          "name": " "
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT column_name, data_type\nFROM information_schema.columns\nWHERE table_name = 'chat_state'\nORDER BY ordinal_position;",
+        "options": {
+          "queryReplacement": "={{ [ $json.chat_id ] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2976,
+        3856
+      ],
+      "id": "8dc368e2-3e16-40c6-9a8b-616cb74a497a",
+      "name": "Optional Debug: Inspect Chat State Columns",
+      "credentials": {
+        "postgres": {
+          "id": " ",
+          "name": " "
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{$('Parse Telegram Command').item.json.TELEGRAM_BOT_TOKEN}}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ \n  {\n    chat_id: $json.chat_id,\n    text: $json.text,\n    reply_markup: $json.reply_markup\n  } \n}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        5616,
+        4800
+      ],
+      "id": "cbc793a4-1fdb-450c-a2bc-254b2e1d4569",
+      "name": "Send Shopping List Message"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{$('Config').item.json.TELEGRAM_BOT_TOKEN}}/editMessageText",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n{\n  chat_id: $json.chat_id,\n  message_id: $('Load Chat State (Toggle)').item.json.shopping_list_message_id,\n  text: $json.text,\n  reply_markup: $json.reply_markup\n}\n}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        4448,
+        4336
+      ],
+      "id": "759033f4-43f9-4cfc-8a39-cce62e8c0254",
+      "name": "Edit Shopping List Message (Toggle)"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{$('Config').item.json.TELEGRAM_BOT_TOKEN}}/editMessageText",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n{\n  chat_id: $json.chat_id,\n  message_id: $('Load Chat State').item.json.shopping_list_message_id,\n  text: $json.text,\n  reply_markup: $json.reply_markup\n}\n}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        5616,
+        4656
+      ],
+      "id": "ddb063b0-c939-42e2-82c8-3405980dcfc5",
+      "name": "Edit Shopping List Message",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE chat_state\nSET shopping_list_message_id = NULL;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2528,
+        3696
+      ],
+      "id": "d96a079c-8ca9-400d-8c9e-3d63c7a7b07c",
+      "name": "Reset Shopping List Message ID",
+      "credentials": {
+        "postgres": {
+          "id": " ",
+          "name": " "
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const meal = $json.meals?.[0];\n\nif (!meal) {\n  throw new Error('No recipe found from TheMealDB.');\n}\n\nconst chatId = $('Parse Telegram Command').item.json.chat_id;\nconst out = [];\n\nfunction normalizeSpaces(s) {\n  return String(s || '')\n    .replace(/\\u00a0/g, ' ')\n    .replace(/\\s+/g, ' ')\n    .trim();\n}\n\nfunction parseNumber(str) {\n  if (!str) return null;\n  str = str.trim();\n\n  const mixed = str.match(/^(\\d+)\\s+(\\d+)\\/(\\d+)$/);\n  if (mixed) {\n    return Number(mixed[1]) + Number(mixed[2]) / Number(mixed[3]);\n  }\n\n  const frac = str.match(/^(\\d+)\\/(\\d+)$/);\n  if (frac) {\n    return Number(frac[1]) / Number(frac[2]);\n  }\n\n  str = str.replace(',', '.');\n  const num = Number(str);\n  return Number.isFinite(num) ? num : null;\n}\n\nfunction normalizeIngredientName(name) {\n  let n = normalizeSpaces(name).toLowerCase();\n\n  n = n\n    .replace(/^eggs$/, 'egg')\n    .replace(/^tomatoes$/, 'tomato')\n    .replace(/^potatoes$/, 'potato')\n    .replace(/^onions$/, 'onion')\n    .replace(/^shallots$/, 'shallot')\n    .replace(/^carrots$/, 'carrot')\n    .replace(/^limes$/, 'lime')\n    .replace(/^lemons$/, 'lemon')\n    .replace(/^cloves of garlic$/, 'garlic')\n    .replace(/^garlic cloves$/, 'garlic')\n    .replace(/^spring onions$/, 'spring onion')\n    .replace(/^bay leaves$/, 'bay leaf')\n    .replace(/^chilies$/, 'chilli')\n    .replace(/^chillies$/, 'chilli')\n    .replace(/^prawns$/, 'prawn')\n    .replace(/^mushrooms$/, 'mushroom')\n    .replace(/^peppers$/, 'pepper')\n    .replace(/^beans$/, 'bean');\n\n  return n;\n}\n\nfunction titleCaseFromKey(key) {\n  return key\n    .split(' ')\n    .map(w => w ? w[0].toUpperCase() + w.slice(1) : w)\n    .join(' ');\n}\n\nfunction parseMeasure(raw) {\n  let s = normalizeSpaces(raw).toLowerCase();\n\n  if (!s) {\n    return { qty: null, unit: null, raw: '' };\n  }\n\n  s = s\n    .replace(/½/g, '1/2')\n    .replace(/¼/g, '1/4')\n    .replace(/¾/g, '3/4');\n\n  const m = s.match(/^(\\d+(?:[.,]\\d+)?(?:\\s+\\d+\\/\\d+)?|\\d+\\/\\d+)\\s*(.*)$/);\n  if (!m) {\n    return { qty: null, unit: raw || null, raw };\n  }\n\n  const qty = parseNumber(m[1]);\n  let unitRaw = normalizeSpaces(m[2]);\n\n  if (qty == null) {\n    return { qty: null, unit: raw || null, raw };\n  }\n\n  const unitMap = [\n    [/^(teaspoons?|tsp)$/i, { factor: 5, unit: 'ml' }],\n    [/^(tablespoons?|tbsp)$/i, { factor: 15, unit: 'ml' }],\n    [/^(cups?|cup)$/i, { factor: 240, unit: 'ml' }],\n    [/^(milliliters?|millilitres?|ml)$/i, { factor: 1, unit: 'ml' }],\n    [/^(liters?|litres?|l)$/i, { factor: 1000, unit: 'ml' }],\n    [/^(fluid ounces?|fl oz)$/i, { factor: 29.5735, unit: 'ml' }],\n    [/^(grams?|g)$/i, { factor: 1, unit: 'g' }],\n    [/^(kilograms?|kg)$/i, { factor: 1000, unit: 'g' }],\n    [/^(ounces?|oz)$/i, { factor: 28.3495, unit: 'g' }],\n    [/^(pounds?|lbs?|lb)$/i, { factor: 453.592, unit: 'g' }],\n  ];\n\n  for (const [regex, conv] of unitMap) {\n    if (regex.test(unitRaw)) {\n      return {\n        qty: Math.round(qty * conv.factor),\n        unit: conv.unit,\n        raw,\n      };\n    }\n  }\n\n  if (/^cloves?$/.test(unitRaw)) return { qty, unit: 'cloves', raw };\n  if (/^bunch(es)?$/.test(unitRaw)) return { qty, unit: 'bunch', raw };\n  if (/^leaves?$/.test(unitRaw)) return { qty, unit: 'leaves', raw };\n  if (/^sprigs?$/.test(unitRaw)) return { qty, unit: 'sprig', raw };\n  if (/^to serve$/.test(unitRaw)) return { qty, unit: 'to garnish', raw };\n  if (/^can(s)?$/.test(unitRaw)) return { qty, unit: 'can', raw };\n  if (/^pinch$/.test(unitRaw)) return { qty, unit: 'pinch', raw };\n  if (/^handful$/.test(unitRaw)) return { qty, unit: 'handful', raw };\n  if (/^large$/.test(unitRaw)) return { qty, unit: 'large', raw };\n  if (/^small$/.test(unitRaw)) return { qty, unit: 'small', raw };\n\n  return {\n    qty,\n    unit: unitRaw || null,\n    raw,\n  };\n}\n\nfor (let i = 1; i <= 20; i++) {\n  const ingredientRaw = normalizeSpaces(meal[`strIngredient${i}`]);\n  const measureRaw = normalizeSpaces(meal[`strMeasure${i}`]);\n\n  if (!ingredientRaw) continue;\n\n  const ingredient_key = normalizeIngredientName(ingredientRaw);\n  const ingredient_name = titleCaseFromKey(ingredient_key);\n  const parsed = parseMeasure(measureRaw);\n\n  out.push({\n    json: {\n      chat_id: chatId,\n      ingredient_key,\n      ingredient_name,\n      qty: parsed.qty,\n      unit: parsed.unit,\n    }\n  });\n}\n\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4160,
+        4720
+      ],
+      "id": "691d9e8d-0d41-4c92-be67-8e784e7c5686",
+      "name": "Build Ingredients For Insert"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO shopping_list_items\n(chat_id, ingredient_key, ingredient_name, qty, unit, created_at, updated_at)\nVALUES ($1, $2, $3, $4, $5, now(), now())\nON CONFLICT (chat_id, ingredient_key, COALESCE(unit,''))\nDO UPDATE SET\n  qty = COALESCE(shopping_list_items.qty, 0) + COALESCE(EXCLUDED.qty, 0),\n  ingredient_name = EXCLUDED.ingredient_name,\n  updated_at = now();",
+        "options": {
+          "queryReplacement": "={{ [\n  $json.chat_id,\n  $json.ingredient_key,\n  $json.ingredient_name,\n  $json.qty,\n  $json.unit\n] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        4336,
+        4720
+      ],
+      "id": "de25692a-cf22-4f0e-a8b5-15c33cfa7ca0",
+      "name": "Insert Shopping List Items",
+      "credentials": {
+        "postgres": {
+          "id": " ",
+          "name": " "
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "={{ 'https://themealdb.com/api/json/v1/1/lookup.php?i=' + $('Parse Telegram Command').item.json.parsed.r }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        3984,
+        4720
+      ],
+      "id": "a38aa45a-b1e7-408a-996c-3b13162d3ac6",
+      "name": "Fetch Recipe By ID (TheMealDB)"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE chat_state\nSET shopping_list_message_id = NULL,\n    updated_at = now()\nWHERE chat_id = $1;",
+        "options": {
+          "queryReplacement": "={{ [ $('Parse Telegram Command').item.json.chat_id ] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        3392,
+        3872
+      ],
+      "id": "ad51becb-1363-48ff-baaa-fb60d70669d0",
+      "name": "Reset Shopping List Message ID (Command)",
+      "credentials": {
+        "postgres": {
+          "id": " ",
+          "name": " "
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{$json.parsed.s}}",
+                    "rightValue": "tmdb",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "34cd38a6-a698-4d3d-9c7c-bddd4ed2ee92"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "TheMealDB"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        3632,
+        4720
+      ],
+      "id": "2f753311-d18c-4a50-a568-8ae55f342b7f",
+      "name": "Route Recipe Source"
+    },
+    {
+      "parameters": {
+        "jsCode": "function clean(s) {\n  return String(s || '').replace(/\\s+/g, ' ').trim();\n}\n\nconst inputItems = $input.all();\nconst out = [];\n\nfor (const item of inputItems) {\n  const meals = item.json.meals || [];\n  if (!meals.length) continue;\n\n  const meal = meals[0];\n\n  const recipeId = clean(meal.idMeal);\n  const title = clean(meal.strMeal);\n  const image = clean(meal.strMealThumb);\n  const category = clean(meal.strCategory);\n  const area = clean(meal.strArea);\n  const instructions = clean(meal.strInstructions);\n\n  const rawIngredients = [];\n  for (let i = 1; i <= 20; i++) {\n    const name = clean(meal[`strIngredient${i}`]);\n    const measure = clean(meal[`strMeasure${i}`]);\n\n    if (!name) continue;\n\n    rawIngredients.push({\n      name,\n      measure,\n    });\n  }\n  const previewCount = Number($('Parse Telegram Command').item.json.INGREDIENT_PREVIEW_COUNT || 8);\n  const ingredientsPreview = rawIngredients\n    .slice(0, previewCount)\n    .map(x => x.measure ? `${x.name} (${x.measure})` : x.name);\n\n  out.push({\n    json: {\n      source: 'tmdb',\n      recipe_id: recipeId,\n      title,\n      category,\n      area,\n      image,\n      instructions,\n      ingredients_preview: ingredientsPreview,\n      raw_ingredients: rawIngredients,\n    }\n  });\n}\n\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3808,
+        4544
+      ],
+      "id": "fc2b2cf1-fe17-4c88-93c8-952ca9805670",
+      "name": "Normalize Recipe (TheMealDB)"
+    },
+    {
+      "parameters": {
+        "jsCode": "const meal = $json.meals?.[0];\n\nif (!meal) {\n  throw new Error('No recipe found for instructions.');\n}\n\nconst chat_id = $('Parse Telegram Command').item.json.chat_id;\nconst title = String(meal.strMeal || 'Recipe').trim();\nconst instructions = String(meal.strInstructions || '').trim();\nconst maxSteps = Number($('Parse Telegram Command').item.json.MAX_INSTRUCTION_STEPS || 30);\n\nfunction escapeHtml(str) {\n  return String(str || '')\n    .replace(/&/g, '&amp;')\n    .replace(/</g, '&lt;')\n    .replace(/>/g, '&gt;');\n}\n\nfunction escapeRegex(str) {\n  return String(str || '').replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');\n}\n\nfunction simplify(text) {\n  return String(text || '')\n    .replace(/^\\s*step\\s*\\d+[:.)\\-\\s]*/i, '')\n    .replace(/^\\s*\\d+[:.)\\-\\s]+/, '')\n    .replace(/about /gi, '')\n    .replace(/approximately /gi, '')\n    .replace(/then /gi, '')\n    .replace(/minutes?/gi, 'Min.')\n    .replace(/tablespoons?/gi, 'tbsp')\n    .replace(/teaspoons?/gi, 'tsp')\n    .replace(/\\s+/g, ' ')\n    .trim();\n}\n\nfunction splitSteps(text) {\n  const cleaned = String(text || '')\n    .replace(/\\r/g, '')\n    .replace(/\\n{2,}/g, '\\n')\n    .replace(/STEP\\s*(\\d+)/gi, '\\nSTEP $1 ')\n    .replace(/(\\d+)\\)\\s*/g, '\\n$1. ')\n    .replace(/\\n+/g, '\\n')\n    .trim();\n\n  let parts = cleaned\n    .split(/\\n(?=STEP\\s*\\d+|\\d+\\.\\s+|- )/i)\n    .map(s => s.trim())\n    .filter(Boolean);\n\n  if (parts.length <= 1) {\n    parts = cleaned\n      .split(/(?<=\\.)\\s+(?=[A-Z])/)\n      .map(s => s.trim())\n      .filter(s => s.length > 8);\n  }\n\n  if (parts.length <= 1) {\n    parts = cleaned\n      .split(/\\n/)\n      .map(s => s.trim())\n      .filter(s => s.length > 8);\n  }\n\n  return parts\n    .map(s => simplify(s))\n    .filter(s => s.length > 8);\n}\n\nconst ingredientNames = [];\nfor (let i = 1; i <= 20; i++) {\n  const name = String(meal[`strIngredient${i}`] || '').trim();\n  if (name) ingredientNames.push(name);\n}\n\nfunction boldIngredients(text, names) {\n  let out = escapeHtml(text);\n  const sorted = [...names].sort((a, b) => b.length - a.length);\n\n  for (const name of sorted) {\n    const pattern = new RegExp(`\\\\b${escapeRegex(name)}\\\\b`, 'gi');\n    out = out.replace(pattern, match => `<b>${escapeHtml(match)}</b>`);\n  }\n\n  return out;\n}\n\nlet steps = splitSteps(instructions);\n\nsteps = steps.filter((step, idx, arr) => {\n  if (idx === 0) return true;\n  return step.toLowerCase() !== arr[idx - 1].toLowerCase();\n});\n\nsteps = steps.slice(0, maxSteps);\n\nlet lines = [];\nlines.push(`🍳 <b>${escapeHtml(title)}</b>`);\nlines.push('');\n\nif (steps.length) {\n  steps.forEach((step, i) => {\n    const bolded = boldIngredients(step, ingredientNames);\n    lines.push(`${i + 1}. ${bolded}`);\n  });\n} else {\n  lines.push(escapeHtml(instructions || 'No instructions available.'));\n}\n\nlet text = lines.join('\\n');\n\nconst maxLen = 3800;\nconst parts = [];\n\nwhile (text.length > maxLen) {\n  let slice = text.slice(0, maxLen);\n  const lastBreak = slice.lastIndexOf('\\n');\n\n  if (lastBreak > 200) {\n    slice = slice.slice(0, lastBreak);\n  }\n\n  parts.push(slice);\n  text = text.slice(slice.length).trim();\n}\n\nparts.push(text);\n\nreturn parts.map((p, i) => ({\n  json: {\n    chat_id,\n    text: i === 0 ? p : `…continued\\n\\n${p}`,\n    parse_mode: 'HTML'\n  }\n}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3904,
+        4880
+      ],
+      "id": "3318fa78-7631-4718-94a0-98310bfe3c26",
+      "name": "Build Recipe Instructions"
+    },
+    {
+      "parameters": {
+        "url": "={{ 'https://themealdb.com/api/json/v1/1/lookup.php?i=' + $('Parse Telegram Command').item.json.parsed.r }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        3632,
+        4880
+      ],
+      "id": "52df62ad-b466-49f3-8492-e2dee9979693",
+      "name": "Fetch Instructions By ID (TheMealDB)"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{$json.parsed.s}}",
+                    "rightValue": "tmdb",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "34cd38a6-a698-4d3d-9c7c-bddd4ed2ee92"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "TheMealDB"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        3328,
+        4880
+      ],
+      "id": "870362af-fca2-44eb-8407-d79a2ac36320",
+      "name": "Route Instruction Source"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{$('Config').item.json.TELEGRAM_BOT_TOKEN}}/sendPhoto",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n{\n  chat_id: $('Parse Telegram Command').item.json.chat_id,\n  photo: $json.photo_url,\n  caption: $json.text,\n  reply_markup: $json.reply_markup\n}\n}}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        4336,
+        4544
+      ],
+      "id": "acb56f4f-d34f-40ff-ad66-8603ef08c321",
+      "name": "Send Recipe Message"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{$('Config').item.json.TELEGRAM_BOT_TOKEN}}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ \n  {\n    chat_id: $json.chat_id,\n    text: $json.text,\n    parse_mode: 'HTML'\n  } \n}}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        4160,
+        4880
+      ],
+      "id": "b7451546-60db-4985-b071-71568a85712a",
+      "name": "Send Recipe Instructions"
+    },
+    {
+      "parameters": {
+        "jsCode": "const slots = Number($('Parse Telegram Command').item.json.RECIPE_SLOTS || 5);\n\nreturn Array.from({ length: slots }, (_, i) => ({\n  json: { slot: i + 1 }\n}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3392,
+        4496
+      ],
+      "id": "44be4d50-8a1c-4937-a225-87096bbd4546",
+      "name": "Create 5 Recipe Slots"
+    },
+    {
+      "parameters": {
+        "jsCode": "const seen = new Set();\nconst out = [];\n\nfor (const item of $input.all()) {\n  const id = item.json.recipe_id;\n  if (!id) continue;\n  if (seen.has(id)) continue;\n  seen.add(id);\n  out.push(item);\n}\n\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3984,
+        4544
+      ],
+      "id": "72c81566-3801-474c-8e26-6743fc2bc796",
+      "name": "Deduplicate Recipes"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT indexname, indexdef\nFROM pg_indexes\nWHERE tablename = 'shopping_list_items';",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2976,
+        4000
+      ],
+      "id": "e24a0e7f-0f55-4c03-b226-c2636661ab0d",
+      "name": "Optional Debug: Check Shopping List Schema",
+      "credentials": {
+        "postgres": {
+          "id": " ",
+          "name": " "
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "DELETE FROM shopping_list_items\nWHERE chat_id = $1;",
+        "options": {
+          "queryReplacement": "={{ [ $('Parse Telegram Command').item.json.chat_id ] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2528,
+        3840
+      ],
+      "id": "625c7c87-b971-48b9-9e00-54db49b8e646",
+      "name": "Optional Debug: Delete Shopping List",
+      "credentials": {
+        "postgres": {
+          "id": " ",
+          "name": " "
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT indexname, indexdef\nFROM pg_indexes\nWHERE tablename = 'shopping_list_items';",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2976,
+        3568
+      ],
+      "id": "bdc3b2bf-b598-4d6e-88ac-2a09eee68781",
+      "name": "Optional Debug: Check Shopping List Index",
+      "credentials": {
+        "postgres": {
+          "id": " ",
+          "name": " "
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "939b54f9-1f77-4d00-8eb6-c361f9ba9015",
+              "leftValue": "={{ $json.parsed.d }}",
+              "rightValue": "y",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        3328,
+        4656
+      ],
+      "id": "031c99df-bc9c-4b41-a7d4-7787cf834177",
+      "name": "Check Recipe Vote Decision"
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{\n  json: {\n    ...$json,\n    TELEGRAM_BOT_TOKEN: '', //Your Telegram Bot Token\n    PAGE_SIZE: 10,\n    RECIPE_SLOTS: 5,\n    INGREDIENT_PREVIEW_COUNT: 8,\n    MAX_INSTRUCTION_STEPS: 30\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2736,
+        4416
+      ],
+      "id": "888736b5-c4fd-4f05-8b0a-5dd28697d173",
+      "name": "Config"
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{\n  json: {\n    chat_id: $('Parse Telegram Command').item.json.chat_id,\n    text: [\n      '🍳 <b>Recipe Bot</b>',\n      '',\n      '<b>Commands</b>',\n      '/recipe — get recipe suggestions',\n      '/list — show shopping list',\n      '/help — show this help',\n      '',\n      '<b>Buttons</b>',\n      '✅ Add to List',\n      '❌ Skip',\n      '📖 Instructions',\n      '🔄 Refresh',\n      '',\n      '<b>Setup</b>',\n      'Enter your Telegram bot token in the Config node and set your PostgreSQL credentials.'\n    ].join('\\n'),\n    parse_mode: 'HTML'\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3328,
+        5056
+      ],
+      "id": "4550371f-f484-449e-b508-66b70724406c",
+      "name": "Build Help Message"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{$('Config').item.json.TELEGRAM_BOT_TOKEN}}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ \n  {\n    chat_id: $json.chat_id,\n    text: $json.text,\n    parse_mode: 'HTML'\n  } \n}}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        3632,
+        5056
+      ],
+      "id": "cc72416f-d127-4b18-9b2b-8930d604aa3f",
+      "name": "Send Help Message"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{$('Parse Telegram Command').item.json.TELEGRAM_BOT_TOKEN}}/answerCallbackQuery",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n{\n  callback_query_id: $('Parse Telegram Command').item.json.callback_id\n}\n}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        3392,
+        4336
+      ],
+      "id": "84a97293-7a59-4ad8-be6e-ed4857b8553d",
+      "name": "Answer Callback Query"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{$('Parse Telegram Command').item.json.TELEGRAM_BOT_TOKEN}}/answerCallbackQuery",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n{\n  callback_query_id: $('Parse Telegram Command').item.json.callback_id,\n  text: 'Refreshing…'\n}\n}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        3392,
+        4176
+      ],
+      "id": "64028a60-144b-4f36-98e2-133a1acdd001",
+      "name": "Answer Callback Query (Refresh)"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{$('Parse Telegram Command').item.json.TELEGRAM_BOT_TOKEN}}/answerCallbackQuery",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n{\n  callback_query_id: $('Parse Telegram Command').item.json.callback_id,\n  text: 'Adding Ingredients…'\n}\n}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        3808,
+        4720
+      ],
+      "id": "8191ed98-8f4a-4b80-ba27-4f511690634d",
+      "name": "Answer Callback Query (Vote)"
+    },
+    {
+      "parameters": {
+        "content": "SETUP — Run once during initial installation.\nThis node is safe to run multiple times.",
+        "height": 128,
+        "width": 160
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        2352,
+        4048
+      ],
+      "id": "9f6f2454-a011-474c-9509-a66c7f1a5808",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "content": "MAINTENANCE — Optional manual actions.\nThese nodes modify or delete data.",
+        "height": 144,
+        "width": 150
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        2352,
+        3776
+      ],
+      "id": "6bf69639-c6ab-4a52-b0d1-73dcc668f45e",
+      "name": "Sticky Note1"
+    },
+    {
+      "parameters": {
+        "content": "For Debug\n",
+        "height": 96,
+        "width": 150
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        3120,
+        3776
+      ],
+      "id": "d1bdc65f-b304-49b2-a83c-9e10de868dd8",
+      "name": "Sticky Note2"
+    },
+    {
+      "parameters": {
+        "content": "Set here your Token and some other variables\n",
+        "height": 80
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        2672,
+        4560
+      ],
+      "id": "2cf57dff-538f-4d24-ae40-ae34c52d6126",
+      "name": "Sticky Note3"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- USE WITH CAUTION, DELETS EVERYTHING AND YOU HAVE TO RUN SETUP AGAIN\nDROP TABLE IF EXISTS shopping_list_items;\nDROP TABLE IF EXISTS chat_state;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2624,
+        3312
+      ],
+      "id": "14034211-33f7-4523-b648-649e86825ccf",
+      "name": "Empty whole DB",
+      "credentials": {
+        "postgres": {
+          "id": " ",
+          "name": " "
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "USE WITH CAUTION\n",
+        "height": 80,
+        "width": 150
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        2608,
+        3216
+      ],
+      "id": "46814f31-5f0f-4c7b-98a7-7aca3d83624c",
+      "name": "Sticky Note4"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Telegram Command": {
+      "main": [
+        [
+          {
+            "node": "Route Telegram Action",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Random Recipe (TheMealDB)": {
+      "main": [
+        [
+          {
+            "node": "Normalize Recipe (TheMealDB)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Recipe Message": {
+      "main": [
+        [
+          {
+            "node": "Send Recipe Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert Chat State": {
+      "main": [
+        [
+          {
+            "node": "Load Chat State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Chat State": {
+      "main": [
+        [
+          {
+            "node": "Count Shopping List Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Count Shopping List Items": {
+      "main": [
+        [
+          {
+            "node": "Load Shopping List Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Shopping List Page": {
+      "main": [
+        [
+          {
+            "node": "Build Shopping List Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Shopping List Message": {
+      "main": [
+        [
+          {
+            "node": "Check Existing Shopping List Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Existing Shopping List Message": {
+      "main": [
+        [
+          {
+            "node": "Edit Shopping List Message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Shopping List Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Telegram Message Metadata": {
+      "main": [
+        [
+          {
+            "node": "Update Chat State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Delete Shopping List Item": {
+      "main": [
+        [
+          {
+            "node": "Load Chat State (Toggle)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Chat State (Toggle)": {
+      "main": [
+        [
+          {
+            "node": "Count Shopping List Items (Toggle)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Count Shopping List Items (Toggle)": {
+      "main": [
+        [
+          {
+            "node": "Load Shopping List Page (Toggle)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Shopping List Page (Toggle)": {
+      "main": [
+        [
+          {
+            "node": "Build Shopping List Message (Toggle)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Shopping List Message (Toggle)": {
+      "main": [
+        [
+          {
+            "node": "Edit Shopping List Message (Toggle)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Telegram Action": {
+      "main": [
+        [
+          {
+            "node": "Reset Shopping List Message ID (Command)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Update Shopping List Page",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Answer Callback Query (Refresh)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Answer Callback Query",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Create 5 Recipe Slots",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Check Recipe Vote Decision",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Route Instruction Source",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Help Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Shopping List Page": {
+      "main": [
+        [
+          {
+            "node": "Load Chat State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Shopping List Message": {
+      "main": [
+        [
+          {
+            "node": "Extract Telegram Message Metadata",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Ingredients For Insert": {
+      "main": [
+        [
+          {
+            "node": "Insert Shopping List Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert Shopping List Items": {
+      "main": [
+        [
+          {
+            "node": "Load Chat State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Recipe By ID (TheMealDB)": {
+      "main": [
+        [
+          {
+            "node": "Build Ingredients For Insert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reset Shopping List Message ID (Command)": {
+      "main": [
+        [
+          {
+            "node": "Upsert Chat State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Recipe Source": {
+      "main": [
+        [
+          {
+            "node": "Answer Callback Query (Vote)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Recipe (TheMealDB)": {
+      "main": [
+        [
+          {
+            "node": "Deduplicate Recipes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Instructions By ID (TheMealDB)": {
+      "main": [
+        [
+          {
+            "node": "Build Recipe Instructions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Instruction Source": {
+      "main": [
+        [
+          {
+            "node": "Fetch Instructions By ID (TheMealDB)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Recipe Instructions": {
+      "main": [
+        [
+          {
+            "node": "Send Recipe Instructions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create 5 Recipe Slots": {
+      "main": [
+        [
+          {
+            "node": "Fetch Random Recipe (TheMealDB)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Deduplicate Recipes": {
+      "main": [
+        [
+          {
+            "node": "Build Recipe Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Recipe Vote Decision": {
+      "main": [
+        [
+          {
+            "node": "Route Recipe Source",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fetch Random Recipe (TheMealDB)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Parse Telegram Command",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Help Message": {
+      "main": [
+        [
+          {
+            "node": "Send Help Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Answer Callback Query": {
+      "main": [
+        [
+          {
+            "node": "Delete Shopping List Item",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Answer Callback Query (Refresh)": {
+      "main": [
+        [
+          {
+            "node": "Load Chat State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Answer Callback Query (Vote)": {
+      "main": [
+        [
+          {
+            "node": "Fetch Recipe By ID (TheMealDB)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": ""
+  },
+  "id": "",
+  "tags": []
+}
