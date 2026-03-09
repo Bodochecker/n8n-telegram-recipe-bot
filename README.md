@@ -3,9 +3,9 @@
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-database-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 # About this project
-
-This is the first project I’ve published publicly on GitHub.  
+ 
 The goal was to build a simple but practical Telegram recipe and shopping list bot for n8n.
+The bot fetches recipe suggestions from **TheMealDB API** and allows you to preview ingredients, view cooking instructions, and add ingredients from a recipe directly to a persistent shopping list stored in PostgreSQL.
 
 Right now the repository contains the **base version using metric units and English ingredient names**.
 
@@ -39,5 +39,15 @@ Thanks for checking out the project.
 - /recipe
 - /list
 - /help
+  
+## Demo
+
+<p align="center">
+  <img src="screenshots/get-help.JPG" width="30%" />
+  <img src="screenshots/get-recipe-and-instructions.JPG" width="30%" />
+  <img src="screenshots/get-shopping-list.JPG" width="30%" />
+</p>
+
 #
+This is the first project I’ve published publicly on GitHub. 
 If you like this project, consider leaving a ⭐ - it would be greatly appreciated :)
