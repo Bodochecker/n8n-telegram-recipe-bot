@@ -49,5 +49,4 @@ Thanks for checking out the project.
 </p>
 
 #
-This is the first project I’ve published publicly on GitHub. 
-If you like this project, consider leaving a ⭐ - it would be greatly appreciated :)
+This is my first project on Github, i hope you like it :-)
